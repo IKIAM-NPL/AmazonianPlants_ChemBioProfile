@@ -1,0 +1,220 @@
+Title: "Four Amazonian plants"
+Author: "Jhesel Almeida"
+Date: "2025-02-23"
+
+## Introduction
+
+This document aims to record the data procedure for statistical analysis of secondary metabolites present in the different conditions (fresh and dry). For each step, a brief explanation, the code and the obtained graphs are included.
+
+The workflow used is taken from the article ["notame": Workflow for Non-Targeted LC–MS Metabolic Profiling](https://doi.org/10.3390/metabo10040135). It offers a wide variety of functions to perform metabolomic profile analysis.
+
+## Before you start
+
+The "notame" package accepts as input a feature table that can be obtained through software such as MZMine, MSDial, among others. In this case, the table was obtained with the help of MZMine. The file (*.xlsx) was slightly modified to obtain the feature table.
+
+The modifications made to the raw file (*.xlsx) can be summarized by adding and renaming columns. The added columns “Column” and “Ion Mode” allow for analyzing samples with different column types and with different ionization modes respectively. In addition, the cells corresponding to mass and retention time must be renamed so that the package can detect and process them.
+
+## Notame workflow
+
+As a first step for the analysis, all the necessary libraries were installed and loaded in Rstudio.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+if (!requireNamespace("devtools", quietly = TRUE)) {
+ install.packages("devtools")
+}
+devtools::install_github("antonvsdata/notame")
+library(notame)
+library(Biobase)
+library(BiocGenerics)
+library(futile.logger)
+library(ggplot2)
+library(magrittr)
+library(foreach)
+library(iterators)
+library(parallel)
+library(doParallel)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("Biobase")
+library(pcaMethods)
+library(patchwork)
+library(cowplot)
+library(Rtsne)
+library(ggdendro)
+library(dplyr)
+library(readxl)
+library(ggsci)
+```
+
+Then, a log system was added to have a record of each process executed.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE}
+init_log(log_file = "RESULTS/Results_2.txt")
+```
+
+Next, the feature list was imported.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+data <- read_from_excel(file = "DATA/GN_Neg.xlsx", sheet = 1, 
+                        corner_row = 4, corner_column = "F", 
+                        split_by = c("Column", "Ion Mode"))
+```
+
+Once the data was read, the next step was to create a MetaboSet in order to create a specific R object.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+modes <- construct_metabosets(exprs = data$exprs, 
+                              pheno_data = data$pheno_data, 
+                              feature_data = data$feature_data,
+                              group_col = "Group")
+```
+
+Finally, each mode was extracted in a single object.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+mode <- modes$RP_NEG
+```
+
+As a additional step, we can visualize the raw data in order to inspect the processing routines.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+Prueba_mode <- modes$RP_NEG
+NEG_raw_sambx <- plot_sample_boxplots(Prueba_mode, order_by = "Group", fill_by = "Group")
+NEG_raw_pca <- plot_pca(Prueba_mode, color = "QC")
+NEG_raw_pca + NEG_raw_sambx
+```
+
+In the boxplot we can see how the abundance of metabolites present in the QCs vary between them, so the drift correction is necessary.
+
+## Preprocessing
+
+The first step of the preprocessing is to change the features with value equal to 0 to NA.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+mode <- mark_nas(mode, value = 0)
+```
+
+Then, features with low detection rate are first flagged and then will be removed. The notame package employs two criteria to select this features. First, is the feature presence in a percentage of QC injections, and then the feature presence in a percentage within a sample group or class.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+mode <- flag_detection(mode, qc_limit = 0.80, group_limit = 0.75)
+```
+
+With these values, features which that were not detected in the 75% of the QC injections and 90% of sample groups will be discarded.
+
+The next steps for preprocessing correspond to drift correction. The drift correction can be applied by smoothed cubic spline regression.
+
+Gn and Pa plants:
+POS – The conditions were maintained.
+NEG – Conditions modified to the following:
+Gn_Neg was considered this: corrected <- flag_quality(corrected, condition = "RSD_r < 0.3& D_ratio_r < 0.6")
+PA_Neg_ was considered this: corrected <- flag_quality(corrected, condition = "RSD_r < 0.6 & D_ratio_r < 1.0")
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+corrected <- correct_drift(mode)
+corrected <- correct_drift(mode)
+corrected <- flag_quality(corrected)
+```
+
+Then we can visualize the correction for QCs.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE}
+EI_corr_sambx <- plot_sample_boxplots(corrected, order_by = "Group", fill_by = "Group")
+EI_corr_pca <- plot_pca(corrected, center = T)
+EI_corr_pca + EI_corr_sambx
+
+
+# Tercer método de corrección del efecto batch
+ #Instalación del paquete RUVSeq
+#if (!require("BiocManager", quietly = TRUE))
+    #install.packages("BiocManager")
+#BiocManager::install("RUVSeq")
+
+#library(RUVSeq)
+
+#Corrección del efecto batch mediante método RUVSeq (Removal of Unwanted variation)
+#replicates <- list(which(corrected$QC == "QC"))
+#batch_corrected <- ruvs_qc(corrected[["exprs"]], batch = "Batch")
+#corrected_batch <- normalize_batches(corrected, batch = "Batch", group = "QC", ref_label = "QC")
+
+```
+
+Contaminant peaks based on the Process Blank were removed with MS-DIAL, therefore the Process Blank group will be removed from the analysis.
+
+Ws and Kp plants:
+POS -For the target, flag_thresh = 1.9 was used
+
+``` {r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+corrected_no_blank <- flag_contaminants(corrected,
+                                        blank_col = "Group",
+                                        blank_label = "B",
+                                        flag_thresh = 0.8,
+                                        flag_label = "Contaminant")
+corrected_no_blank <- corrected_no_blank[, corrected_no_blank$Group != "B"]
+corrected_no_qc <- drop_qcs(corrected_no_blank)
+```
+
+Finally, we can plot the PCA.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE}
+EI_PCA_2<-plot_pca(corrected_no_qc, color = "Group")
+EI_PCA_2
+```
+imputación de datos
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE}
+
+# To clean data
+set.seed(8)
+imputed <- impute_rf(corrected_no_qc)
+
+```
+
+# Second PCA and loading plot
+
+Droping flagged features
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+no_flag <- drop_flagged(imputed)
+
+# Extracting feature table (Expression data)
+peak_Height <- exprs(no_flag)
+
+# Extracting Phenotipic data
+EI_pheno_data <- no_flag@phenoData@data
+```
+
+Preparing data and transposing feature table.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+EI_feat_table_pca  <- t(peak_Height)
+
+#Changing NA to 0 
+EI_feat_table_pca[is.na(EI_feat_table_pca)]=0
+
+# Centering and Scaling features
+EI_pca <- prcomp(EI_feat_table_pca, center = T, scale. = T)
+```
+
+Plotting PCA results.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+scores <- EI_pca$x %>%               # Get PC coordinates
+  data.frame %>%                            # Convert to data frames
+  mutate(Sample_ID = rownames(.)) %>%       # Create a new column with the sample names
+  left_join(EI_pheno_data )                  # Adding metadata
+
+ggplot(scores, aes(PC1, PC2, color = Group, shape = Group)) + geom_point(size = 3)  + guides(x=guide_axis(title = "PC 1 (67 %)"), y=guide_axis(title = "PC 2 (18 %)")) +
+  theme_classic()
+
+# Save plot
+ggsave('RESULTADOS/GN_Neg_2.png', width = 5, height = 4, device='png', dpi="print")
+```
+
+# Notame 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, error=FALSE, results='hide'}
+#"notame" output to find and filter height of identified metabolites
+write_to_excel(no_flag, "RESULTS/GN_Neg.xlsx")
+```
